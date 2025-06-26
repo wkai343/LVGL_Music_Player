@@ -180,19 +180,53 @@ void lv_user_gui_init(void) {
     dma_init();
     i2s2_init();
     audio_sem = rt_sem_create("audio_sem", 1, RT_IPC_FLAG_PRIO);
-    auto device = std::make_shared<AudioDevice>([]{ rt_sem_take(audio_sem, rtthread::WAIT_FOREVER); },
-                                                [](int16_t* buffer, uint16_t size) {
-                                                    HAL_I2S_Transmit_DMA(&hi2s2, reinterpret_cast<uint16_t*>(buffer), size);
-                                                });
+    auto device_set_format = [](uint32_t sample_rate, uint8_t num_channels, uint8_t bit_depth) {
+        hi2s2.Init.AudioFreq = sample_rate;
+        if (bit_depth == 16)
+            hi2s2.Init.DataFormat = I2S_DATAFORMAT_16B;
+        else if (bit_depth == 24)
+            hi2s2.Init.DataFormat = I2S_DATAFORMAT_24B;
+        else
+            hi2s2.Init.DataFormat = I2S_DATAFORMAT_32B;
+        if (HAL_I2S_Init(&hi2s2) != HAL_OK)
+            Error_Handler();
+    };
+    // DMA正常模式
+    // auto device = std::make_shared<AudioDevice>(
+    //     []{ rt_sem_take(audio_sem, rtthread::WAIT_FOREVER); },
+    //     []{
+    //         rt_sem_delete(audio_sem);
+    //         audio_sem = rt_sem_create("audio_sem", 1, RT_IPC_FLAG_PRIO);
+    //     },
+    //     [](int16_t* buffer, uint16_t size) { HAL_I2S_Transmit_DMA(&hi2s2, reinterpret_cast<uint16_t*>(buffer), size); },
+    //     device_set_format
+    // );
+    // DMA循环模式
+    auto device = std::make_shared<AudioDevice>(
+        []{ rt_sem_take(audio_sem, rtthread::WAIT_FOREVER); },
+        []{
+            rt_sem_delete(audio_sem);
+            audio_sem = rt_sem_create("audio_sem", 1, RT_IPC_FLAG_PRIO);
+        },
+        [](int16_t* buffer, uint16_t size) { HAL_I2S_Transmit_DMA(&hi2s2, reinterpret_cast<uint16_t*>(buffer), size); },
+        []{ HAL_I2S_DMAStop(&hi2s2); },
+        device_set_format
+    );
     // i2s注册传输完成回调
     HAL_I2S_RegisterCallback(&hi2s2, HAL_I2S_TX_COMPLETE_CB_ID, [](I2S_HandleTypeDef* hi2s) {
         if (hi2s->Instance == SPI2)
             rt_sem_release(audio_sem);
     });
+    if (device->is_double_buffer_mode()) {
+        HAL_I2S_RegisterCallback(&hi2s2, HAL_I2S_TX_HALF_COMPLETE_CB_ID, [](I2S_HandleTypeDef* hi2s) {
+            if (hi2s->Instance == SPI2)
+                rt_sem_release(audio_sem);
+        });
+    }
     player.init(device, {lv_lock, lv_unlock});
     rt_thread_t player_thread = rt_thread_create("player", [](void*) {
-        std::this_thread::sleep_for(1s); // 确保sd卡挂载完成
-        player.search_songs("/sdcard"); // 默认搜索/sdcard目录下的音乐
+        std::this_thread::sleep_for(1s);
+        player.search_songs("/sdcard");
         while (true)
             player.task_handler();
     }, RT_NULL, 4096, 1, 20);

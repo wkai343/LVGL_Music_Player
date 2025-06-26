@@ -9,7 +9,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <array>
 #include <lvgl.h>
 #include "lock.hpp"
 #include "audio.hpp"
@@ -58,7 +57,7 @@ class Player {
                     // 开始拖动时扩展进度条宽度
                     p->is_dragging_progress = true;
                     lv_obj_set_width(progress_bar, LV_PCT(95));
-                    lv_obj_clear_flag(p->dragTime_label, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_remove_flag(p->dragTime_label, LV_OBJ_FLAG_HIDDEN);
                     lv_label_set_text_fmt(p->dragTime_label, "%02d:%02d", value / 60, value % 60);
                 } else if (event_code == LV_EVENT_VALUE_CHANGED) {
                     // 拖动过程中只更新UI显示，不改变播放位置
@@ -83,7 +82,7 @@ class Player {
             lv_obj_add_event_cb(playlist_btn, [](lv_event_t* e) {
                 auto p = static_cast<UI*>(lv_event_get_user_data(e));
                 if (lv_obj_has_flag(p->playlist_list, LV_OBJ_FLAG_HIDDEN)) {
-                    lv_obj_clear_flag(p->playlist_list, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_remove_flag(p->playlist_list, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_move_foreground(p->playlist_list);
                 } else {
                     lv_obj_add_flag(p->playlist_list, LV_OBJ_FLAG_HIDDEN);
@@ -93,7 +92,7 @@ class Player {
             lv_obj_add_event_cb(vol_btn, [](lv_event_t* e) {
                 auto p = static_cast<UI*>(lv_event_get_user_data(e));
                 if (lv_obj_has_flag(p->vol_slider, LV_OBJ_FLAG_HIDDEN)) {
-                    lv_obj_clear_flag(p->vol_slider, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_remove_flag(p->vol_slider, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_move_foreground(p->vol_slider);
                 } else {
                     lv_obj_add_flag(p->vol_slider, LV_OBJ_FLAG_HIDDEN);
@@ -105,7 +104,7 @@ class Player {
             auto main_cont = lv_obj_create(lv_screen_active());
             lv_obj_set_size(main_cont, LV_HOR_RES, LV_VER_RES);
             lv_obj_set_style_pad_all(main_cont, 0, 0);
-            lv_obj_clear_flag(main_cont, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_remove_flag(main_cont, LV_OBJ_FLAG_SCROLLABLE);
 
             // 顶部区域 - 歌曲名称
             auto top_area = lv_obj_create(main_cont);
@@ -371,8 +370,8 @@ class Player {
     // 状态
     bool is_playing{};
     size_t current_song_index{0};
-    mutable std::mutex state_m, song_m;
-    std::condition_variable cv;
+    mutable std::mutex volume_mutex, state_mutex, song_mutex;
+    mutable std::condition_variable cv;
     std::function<void()> lv_lock = []{}, lv_unlock = []{}; // lvgl互斥锁
 
     Playlist playlist;
@@ -380,12 +379,20 @@ class Player {
     std::shared_ptr<AudioDevice> device;
 
     bool playBuffer{};
-    std::array<int16_t, 4096> buffer[2];
+    int16_t buffer[2][8192];
 
     unsigned fill_buffer() {
         auto& buf = buffer[!playBuffer];
-        auto bytesRead = song.read(reinterpret_cast<uint8_t*>(buf.data()), buf.size() * sizeof *buf.data());
         playBuffer = !playBuffer;
+        std::lock_guard song_lk(song_mutex);
+        auto bytesRead = song.read(reinterpret_cast<uint8_t*>(buf), sizeof buf);
+        return bytesRead;
+    }
+
+    unsigned pre_fill_buffer() {
+        auto& buf = buffer;
+        std::lock_guard song_lk(song_mutex);
+        auto bytesRead = song.read(reinterpret_cast<uint8_t*>(buf), sizeof buf);
         return bytesRead;
     }
 
@@ -395,13 +402,30 @@ class Player {
         if (index >= playlist.size())
             index = 0;
         
+        // 记住之前的播放状态
+        std::unique_lock state_lk(state_mutex);
+        bool was_playing = is_playing;
+        state_lk.unlock();
+        
+        // 如果正在播放，先暂停
+        if (was_playing) {
+            pause();
+        }
+        
         std::string_view name = playlist[index];
-        std::unique_lock song_lk(song_m);
-        song.load(name);
-        current_song_index = index;
+        {
+            std::lock_guard song_lk(song_mutex);
+            if (song.load(name) == -1)
+                return;
+            current_song_index = index;
 
-        device->set_format(song.sample_rate, song.num_channels, song.bit_depth);
-
+            if (device)
+                device->set_format(song.sample_rate, song.num_channels, song.bit_depth);
+        }
+        // 如果之前在播放，自动恢复播放状态
+        if (was_playing) {
+            play();
+        }
         ScopedLock lock(lv_lock, lv_unlock);
         // 更新ui
         ui.songName_set(name);
@@ -445,6 +469,9 @@ public:
         ScopedLock lock(lv_lock, lv_unlock);
         ui.playlist_load(playlist);
     }
+    void reload() {
+        load(current_song_index);
+    }
     // 上一曲
     void prev_song() {
         load((current_song_index == 0) ? playlist.size() - 1 : current_song_index - 1);
@@ -455,7 +482,7 @@ public:
     }
     // 播放/暂停控制
     void play() {
-        std::lock_guard state_lk(state_m);
+        std::lock_guard state_lk(state_mutex);
         if (is_playing)
             return;
         is_playing = true;
@@ -465,7 +492,7 @@ public:
         ui.state_set_playing();
     }
     void pause() {
-        std::lock_guard state_lk(state_m);
+        std::lock_guard state_lk(state_mutex);
         if (!is_playing)
             return;
         is_playing = false;
@@ -474,19 +501,25 @@ public:
         ui.state_set_playing(false);
     }
     void toggle_play_pause() {
-        if (is_playing)
+        std::unique_lock state_lk(state_mutex);
+        if (is_playing) {
+            state_lk.unlock();
             pause();
-        else
+        } else {
+            state_lk.unlock();
             play();
+        }
     }
     // 音量控制方法
     void set_volume(uint8_t vol) {
+        std::lock_guard volume_lk(volume_mutex);
         device->set_volume(vol);
         
         ScopedLock lock(lv_lock, lv_unlock);
         ui.volume_set(vol);
     }
     uint8_t get_volume() const {
+        std::lock_guard volume_lk(volume_mutex);
         return device->get_volume();
     }
     // 注册互斥锁函数
@@ -518,31 +551,89 @@ public:
             progress_update_counter = 0;
         }
     }
-    // 事件处理
+    // 音乐播放任务
     void task_handler() {
-        std::unique_lock lk(state_m);
+        std::unique_lock lk(state_mutex);
         cv.wait(lk, [this] { return is_playing; }); // 等待播放状态变为true
         lk.unlock();
         
-        std::unique_lock song_lk(song_m);
-        if (!song.is_valid()) {
+        if (!device) {
             pause();
             return;
         }
 
-        auto bytesRead = fill_buffer();
-        if (bytesRead == 0) {
-            song.seek_to(0); // 如果读取到文件末尾，重置到开头
-            pause(); // 如果没有读取到数据，暂停播放
-            ScopedLock lock(lv_lock, lv_unlock);
-            ui.progress_update(0);
+        std::unique_lock song_lk(song_mutex);
+        if (!song.is_valid()) {
+            song_lk.unlock();
+            pause();
             return;
         }
-        
-        progress_update();
         song_lk.unlock();
-        
-        device->transmit(buffer[playBuffer].data(), bytesRead / 2);
+
+        if (device->is_double_buffer_mode()) {
+            // 重置缓冲区状态和信号量
+            playBuffer = false;
+            device->sem_reset(); // 重置信号量状态
+            
+            pre_fill_buffer(); // 预填充缓冲区
+            {
+                std::lock_guard volume_lk(volume_mutex);
+                device->volume.apply(*buffer, sizeof buffer / 2);
+            }
+            device->double_buffer_start(reinterpret_cast<int16_t*>(buffer), sizeof buffer / 2);
+            while (true) {
+                device->sem_acquire();
+                {
+                    std::lock_guard state_lk(state_mutex);
+                    if (!is_playing) {
+                        device->double_buffer_stop();
+                        return;
+                    }
+                }
+                auto bytesRead = fill_buffer();
+                {
+                    std::lock_guard volume_lk(volume_mutex);
+                    device->volume.apply(buffer[playBuffer], bytesRead / 2);
+                }
+                if (bytesRead == 0) {
+                    song_lk.lock();
+                    song.seek_to(0);
+                    song_lk.unlock();
+                    pause();
+                    ScopedLock lock(lv_lock, lv_unlock);
+                    ui.progress_update(0);
+                    break;
+                }
+                std::fill(buffer[playBuffer] + bytesRead / 2, buffer[playBuffer] + (sizeof(buffer[playBuffer]) / 2), 0);
+                progress_update();
+            }
+        } else {
+            auto bytesRead = fill_buffer();
+            {
+                std::lock_guard volume_lk(volume_mutex);
+                device->volume.apply(buffer[playBuffer], bytesRead / 2);
+            }
+            if (bytesRead == 0) {
+                song_lk.lock();
+                song.seek_to(0);
+                song_lk.unlock();
+                pause();
+                ScopedLock lock(lv_lock, lv_unlock);
+                ui.progress_update(0);
+                return;
+            }
+            
+            device->sem_acquire();
+            {
+                std::lock_guard state_lk(state_mutex);
+                if (!is_playing) {
+                    device->sem_reset();
+                    return;
+                }
+            }
+            device->transmit(buffer[playBuffer], bytesRead / 2);
+            progress_update();
+        }
     }
 };
 

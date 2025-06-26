@@ -1,7 +1,6 @@
 #ifndef VOLUME_H
 #define VOLUME_H
 
-#include <cstddef>
 #include <cstdint>
 #include <ranges>
 #include <span>
@@ -51,6 +50,9 @@ public:
         // 使用预计算的音量因子
         for (size_t i = 0; i < sz; ++i)
             arr[i] = static_cast<T>(arr[i] * volume_factor);
+    }
+    float get_factor() const {
+        return volume_factor;
     }
 };
 

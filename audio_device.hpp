@@ -3,51 +3,43 @@
 
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include "volume.hpp"
 
 class AudioDevice {
-    mutable std::mutex volume_mutex; // 保护音量操作的互斥锁
-
-    uint32_t sample_rate{};
-    uint8_t num_channels{};
-    uint8_t bit_depth{};
-    Volume volume;
-    std::function<void()> sem_acquire = []{}; // 传输前获取信号量函数
-    std::function<void(int16_t* buffer, uint16_t size)> _transmit = [](int16_t*, uint16_t){};
+    bool buf_mode{}; // 是否使用双缓冲模式
 public:
-    AudioDevice(decltype(sem_acquire) sem_acquire = []{}, 
-                decltype(_transmit) audio_transmit = [](int16_t*, uint16_t){}) 
-        : sem_acquire(sem_acquire), _transmit(audio_transmit) {}
-    // 音频传输函数
-    std::function<void(int16_t* buffer, uint16_t size)> transmit = [this](int16_t* buffer, uint16_t size){
-        {
-            std::lock_guard<std::mutex> lock(volume_mutex);
-            volume.apply(buffer, size);
-        }
-        sem_acquire();
-        _transmit(buffer, size);
-    };
-    // 注册等待传输完成函数
-    void register_sem_aquire(std::function<void()> sem_acquire) {
-        this->sem_acquire = sem_acquire;
-    }
-    // 注册传输函数
-    void register_transmit(std::function<void(int16_t* buffer, uint16_t size)> audio_transmit) {
-        this->_transmit = audio_transmit;
-    }
-    void set_format(uint32_t sample_rate, uint8_t num_channels, uint8_t bit_depth) {
-        this->sample_rate = sample_rate;
-        this->num_channels = num_channels;
-        this->bit_depth = bit_depth;
-    }
+    Volume volume;
+    std::function<void()> sem_acquire = []{}; // 传输前获取信号量
+    std::function<void()> sem_reset = []{}; // 双缓冲模式下重置信号量
+    std::function<void(int16_t* buffer, uint16_t size)> double_buffer_start = [](int16_t*, uint16_t){}; // 双缓冲模式下开始传输
+    std::function<void()> double_buffer_stop = []{}; // 双缓冲模式下停止传输
+    std::function<void(int16_t* buffer, uint16_t size)> transmit = [](int16_t*, uint16_t){}; // 音频传输
+    std::function<void(uint32_t, uint8_t, uint8_t)> set_format = [](uint32_t, uint8_t, uint8_t){}; // 设置音频格式
+    
+    AudioDevice(decltype(sem_acquire) sem_acquire = []{},
+                decltype(sem_reset) sem_reset = []{},
+                decltype(transmit) audio_transmit = [](int16_t*, uint16_t){},
+                decltype(set_format) set_format = [](uint32_t, uint8_t, uint8_t){}) 
+        : sem_acquire(sem_acquire), sem_reset(sem_reset), transmit(audio_transmit), set_format(set_format) {}
+    AudioDevice(decltype(sem_acquire) sem_acquire = []{},
+                decltype(sem_reset) sem_reset = []{},
+                decltype(double_buffer_start) double_buffer_start = [](int16_t*, uint16_t){},
+                decltype(double_buffer_stop) double_buffer_stop = []{},
+                decltype(set_format) set_format = [](uint32_t, uint8_t, uint8_t){}) 
+        : sem_acquire(sem_acquire), sem_reset(sem_reset), double_buffer_start(double_buffer_start), double_buffer_stop(double_buffer_stop), set_format(set_format), buf_mode{true} {}
+    
     void set_volume(uint8_t vol) {
-        std::lock_guard<std::mutex> lock(volume_mutex);
         volume.set(vol);
     }
     uint8_t get_volume() const {
-        std::lock_guard<std::mutex> lock(volume_mutex);
         return volume.get();
+    }
+    float get_volume_factor() const {
+        return volume.get_factor();
+    }
+
+    bool is_double_buffer_mode() const {
+        return buf_mode;
     }
 };
 
