@@ -463,30 +463,18 @@ private:
     
     // 根据播放模式获取下一首歌曲索引
     size_t get_next_song_index() {
-        if (playlist.empty()) return 0;
+        if (playlist.empty())
+            return 0;
         
-        switch (current_play_mode) {
-            case PlayMode::SEQUENTIAL:
-            case PlayMode::RANDOM:
-                return (current_song_index + 1) % playlist.size();
-            case PlayMode::SINGLE_LOOP:
-                return current_song_index; // 单曲循环，返回当前索引
-        }
-        return 0;
+        return (current_song_index + 1) % playlist.size();
     }
     
     // 根据播放模式获取上一曲歌曲索引
     size_t get_prev_song_index() {
-        if (playlist.empty()) return 0;
+        if (playlist.empty())
+            return 0;
         
-        switch (current_play_mode) {
-            case PlayMode::SEQUENTIAL:
-            case PlayMode::RANDOM:
-                return (current_song_index == 0) ? playlist.size() - 1 : current_song_index - 1;
-            case PlayMode::SINGLE_LOOP:
-                return current_song_index; // 单曲循环，返回当前索引
-        }
-        return 0;
+        return (current_song_index == 0) ? playlist.size() - 1 : current_song_index - 1;
     }
 
 public:
@@ -703,7 +691,11 @@ public:
             }
             if (bytesRead == 0) {
                 device->transmit_stop();
-                next_song(); // 切换到下一首
+                if (current_play_mode == PlayMode::SINGLE_LOOP) {
+                    reload(); // 单曲循环
+                } else {
+                    next_song(); // 切换到下一首
+                }
                 return;
             }
             std::fill(buffer[playBuffer] + bytesRead / 2, buffer[playBuffer] + (sizeof(buffer[playBuffer]) / 2), 0);
@@ -724,8 +716,11 @@ public:
                     device->volume.apply(buffer[playBuffer], bytesRead / 2);
                 }
                 if (bytesRead == 0) {
-                    device->transmit_stop();
-                    next_song(); // 切换到下一首
+                    if (current_play_mode == PlayMode::SINGLE_LOOP) {
+                        reload(); // 单曲循环
+                    } else {
+                        next_song(); // 切换到下一首
+                    }
                     return;
                 }
                 std::fill(buffer[playBuffer] + bytesRead / 2, buffer[playBuffer] + (sizeof(buffer[playBuffer]) / 2), 0);
@@ -738,7 +733,11 @@ public:
                 device->volume.apply(buffer[playBuffer], bytesRead / 2);
             }
             if (bytesRead == 0) {
-                next_song(); // 切换到下一首
+                if (current_play_mode == PlayMode::SINGLE_LOOP) {
+                    reload(); // 单曲循环
+                } else {
+                    next_song(); // 切换到下一首
+                }
                 return;
             }
             
