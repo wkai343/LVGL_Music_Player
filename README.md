@@ -179,6 +179,8 @@ extern "C"
 void lv_user_gui_init(void) {
     dma_init();
     i2s2_init();
+    rng_init();
+    
     audio_sem = rt_sem_create("audio_sem", 1, RT_IPC_FLAG_PRIO);
     auto device_set_format = [](uint32_t sample_rate, uint8_t num_channels, uint8_t bit_depth) {
         hi2s2.Init.AudioFreq = sample_rate;
@@ -191,39 +193,34 @@ void lv_user_gui_init(void) {
         if (HAL_I2S_Init(&hi2s2) != HAL_OK)
             Error_Handler();
     };
-    // DMA正常模式
-    // auto device = std::make_shared<AudioDevice>(
-    //     []{ rt_sem_take(audio_sem, rtthread::WAIT_FOREVER); },
-    //     []{
-    //         rt_sem_delete(audio_sem);
-    //         audio_sem = rt_sem_create("audio_sem", 1, RT_IPC_FLAG_PRIO);
-    //     },
-    //     [](int16_t* buffer, uint16_t size) { HAL_I2S_Transmit_DMA(&hi2s2, reinterpret_cast<uint16_t*>(buffer), size); },
-    //     device_set_format
-    // );
-    // DMA循环模式
     auto device = std::make_shared<AudioDevice>(
-        []{ rt_sem_take(audio_sem, rtthread::WAIT_FOREVER); },
-        []{
+        [] { rt_sem_take(audio_sem, rtthread::WAIT_FOREVER); }, 
+        [](uint8_t n) {
             rt_sem_delete(audio_sem);
-            audio_sem = rt_sem_create("audio_sem", 1, RT_IPC_FLAG_PRIO);
-        },
-        [](int16_t* buffer, uint16_t size) { HAL_I2S_Transmit_DMA(&hi2s2, reinterpret_cast<uint16_t*>(buffer), size); },
-        []{ HAL_I2S_DMAStop(&hi2s2); },
+            audio_sem = rt_sem_create("audio_sem", n, RT_IPC_FLAG_PRIO);
+        }, 
+        [](int16_t* buffer, uint16_t size) { HAL_I2S_Transmit_DMA(&hi2s2, reinterpret_cast<uint16_t*>(buffer), size); }, 
+        [] { HAL_I2S_DMAStop(&hi2s2); },
         device_set_format
+        , true // 使用循环模式
     );
     // i2s注册传输完成回调
     HAL_I2S_RegisterCallback(&hi2s2, HAL_I2S_TX_COMPLETE_CB_ID, [](I2S_HandleTypeDef* hi2s) {
         if (hi2s->Instance == SPI2)
             rt_sem_release(audio_sem);
     });
-    if (device->is_double_buffer_mode()) {
+    if (device->is_circular_mode()) {
         HAL_I2S_RegisterCallback(&hi2s2, HAL_I2S_TX_HALF_COMPLETE_CB_ID, [](I2S_HandleTypeDef* hi2s) {
             if (hi2s->Instance == SPI2)
                 rt_sem_release(audio_sem);
         });
     }
-    player.init(device, {lv_lock, lv_unlock});
+    player.init(device, {lv_lock, lv_unlock}, 
+        [](Player::Playlist& pl) {
+            std::default_random_engine gen(rng_device());
+            std::ranges::shuffle(pl, gen);
+        }
+    );
     rt_thread_t player_thread = rt_thread_create("player", [](void*) {
         std::this_thread::sleep_for(1s);
         player.search_songs("/sdcard");
