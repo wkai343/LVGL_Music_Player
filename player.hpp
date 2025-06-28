@@ -16,6 +16,8 @@
 #include "audio.hpp"
 #include "audio_device.hpp"
 
+LV_FONT_DECLARE(zh)
+
 class Player {
 public:
     using Playlist = std::vector<std::string>;
@@ -92,10 +94,13 @@ private:
             // 音量
             lv_obj_add_event_cb(vol_slider, [](lv_event_t* e) {
                 auto ui = static_cast<UI*>(lv_event_get_user_data(e));
+                auto event_code = lv_event_get_code(e);
                 auto vol_value = lv_slider_get_value(static_cast<lv_obj_t*>(lv_event_get_target(e)));
-                ui->volume_set(vol_value);
-                ui->player->device->set_volume(vol_value);
-            }, LV_EVENT_VALUE_CHANGED, this);
+                
+                if (event_code == LV_EVENT_RELEASED) {
+                    ui->player->device->set_volume(vol_value);
+                }
+            }, LV_EVENT_ALL, this);
             // 歌单按钮事件：弹出/隐藏歌单
             lv_obj_add_event_cb(playlist_btn, [](lv_event_t* e) {
                 auto ui = static_cast<UI*>(lv_event_get_user_data(e));
@@ -140,6 +145,7 @@ private:
             // 歌曲名标签
             songName_label = lv_label_create(top_area);
             lv_label_set_text(songName_label, "无播放歌曲");
+            lv_obj_set_style_text_font(songName_label, &zh, 0);
             lv_obj_set_width(songName_label, LV_PCT(90));
             lv_obj_set_style_text_align(songName_label, LV_TEXT_ALIGN_CENTER, 0);
             lv_label_set_long_mode(songName_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -362,7 +368,9 @@ private:
 
             // 重新添加所有歌曲
             for (size_t i = 0; i < new_playlist.size(); ++i) {
-                auto btn = lv_list_add_btn(playlist_list, nullptr, new_playlist[i].c_str());
+                auto btn = lv_list_add_button(playlist_list, nullptr, new_playlist[i].c_str());
+                auto label = lv_obj_get_child(btn, 0);
+                lv_obj_set_style_text_font(label, &zh, 0);
                 if (i == player->current_song_index)
                     lv_obj_set_style_bg_color(btn, lv_color_hex(0x007BFF), LV_PART_MAIN);
                 // 事件：点击切换歌曲
